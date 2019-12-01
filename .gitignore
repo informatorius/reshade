@@ -5,7 +5,9 @@
 [Bb]uild/
 [Dd]ebug/
 [Rr]elease/
+*.obj
 *.cso
+*.spv
 
 # Visual Studio cache files
 .vs/
@@ -17,7 +19,15 @@ packages/
 *.sdf
 *.opensdf
 *.suo
-*.user
+*.vcxproj.user
+
+# Visual Studio performance profiling
+*.vsp
+*.psess
+
+# Code signing
+*.pfx
+*.pvk
 
 # Temporary OS files
 .DS_Store

@@ -6,360 +6,323 @@
 #include "log.hpp"
 #include "d3d10_device.hpp"
 #include "../dxgi/dxgi_device.hpp"
+#include "../dxgi/format_utils.hpp"
 
-// ID3D10Device
+D3D10Device::D3D10Device(IDXGIDevice1 *dxgi_device, ID3D10Device1 *original) :
+	_orig(original),
+	_dxgi_device(new DXGIDevice(dxgi_device, this)),
+	_buffer_detection(original) {
+	assert(_orig != nullptr);
+}
+
+bool D3D10Device::check_and_upgrade_interface(REFIID riid)
+{
+	if (riid == __uuidof(this) ||
+		// IUnknown is handled by DXGIDevice
+		riid == __uuidof(ID3D10Device) ||
+		riid == __uuidof(ID3D10Device1))
+		return true;
+
+	return false;
+}
+
 HRESULT STDMETHODCALLTYPE D3D10Device::QueryInterface(REFIID riid, void **ppvObj)
 {
 	if (ppvObj == nullptr)
-	{
 		return E_POINTER;
-	}
-	else if (
-		riid == __uuidof(this) ||
-		riid == __uuidof(IUnknown) ||
-		riid == __uuidof(ID3D10Device) ||
-		riid == __uuidof(ID3D10Device1))
+
+	if (check_and_upgrade_interface(riid))
 	{
 		AddRef();
-
 		*ppvObj = this;
-
 		return S_OK;
 	}
-	else if (
-		riid == __uuidof(DXGIDevice) ||
-		riid == __uuidof(IDXGIObject) ||
-		riid == __uuidof(IDXGIDevice) ||
-		riid == __uuidof(IDXGIDevice1) ||
-		riid == __uuidof(IDXGIDevice2) ||
-		riid == __uuidof(IDXGIDevice3))
-	{
-		assert(_dxgi_device != nullptr);
 
-		return _dxgi_device->QueryInterface(riid, ppvObj);
+	// Note: Objects must have an identity, so use DXGIDevice for IID_IUnknown
+	// See https://docs.microsoft.com/en-us/windows/desktop/com/rules-for-implementing-queryinterface
+	if (_dxgi_device->check_and_upgrade_interface(riid))
+	{
+		_dxgi_device->AddRef();
+		*ppvObj = _dxgi_device;
+		return S_OK;
 	}
 
 	return _orig->QueryInterface(riid, ppvObj);
 }
-ULONG STDMETHODCALLTYPE D3D10Device::AddRef()
+ULONG   STDMETHODCALLTYPE D3D10Device::AddRef()
 {
-	_ref++;
+	_orig->AddRef();
 
-	assert(_dxgi_device != nullptr);
-
+	// Add references to other objects that are coupled with the device
 	_dxgi_device->AddRef();
 
-	return _orig->AddRef();
+	return InterlockedIncrement(&_ref);
 }
-ULONG STDMETHODCALLTYPE D3D10Device::Release()
+ULONG   STDMETHODCALLTYPE D3D10Device::Release()
 {
-	assert(_dxgi_device != nullptr);
-
+	// Release references to other objects that are coupled with the device
 	_dxgi_device->Release();
 
-	ULONG ref = _orig->Release();
+	const ULONG ref = InterlockedDecrement(&_ref);
+	const ULONG ref_orig = _orig->Release();
+	if (ref != 0)
+		return ref;
+	if (ref_orig != 0) // Verify internal reference count
+		LOG(WARN) << "Reference count for ID3D10Device1 object " << this << " is inconsistent.";
 
-	if (--_ref == 0 && ref != 0)
-	{
-		LOG(WARNING) << "Reference count for 'ID3D10Device1' object " << this << " is inconsistent: " << ref << ", but expected 0.";
+#if RESHADE_VERBOSE_LOG
+	LOG(DEBUG) << "Destroyed ID3D10Device1 object " << this << '.';
+#endif
+	delete this;
 
-		ref = 0;
-	}
-
-	if (ref == 0)
-	{
-		assert(_ref <= 0);
-
-		LOG(INFO) << "Destroyed 'ID3D10Device1' object " << this << ".";
-
-		delete this;
-	}
-
-	return ref;
+	return 0;
 }
-void STDMETHODCALLTYPE D3D10Device::VSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer *const *ppConstantBuffers)
+
+void    STDMETHODCALLTYPE D3D10Device::VSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer *const *ppConstantBuffers)
 {
 	_orig->VSSetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
 }
-void STDMETHODCALLTYPE D3D10Device::PSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView *const *ppShaderResourceViews)
+void    STDMETHODCALLTYPE D3D10Device::PSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView *const *ppShaderResourceViews)
 {
 	_orig->PSSetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
 }
-void STDMETHODCALLTYPE D3D10Device::PSSetShader(ID3D10PixelShader *pPixelShader)
+void    STDMETHODCALLTYPE D3D10Device::PSSetShader(ID3D10PixelShader *pPixelShader)
 {
 	_orig->PSSetShader(pPixelShader);
 }
-void STDMETHODCALLTYPE D3D10Device::PSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState *const *ppSamplers)
+void    STDMETHODCALLTYPE D3D10Device::PSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState *const *ppSamplers)
 {
 	_orig->PSSetSamplers(StartSlot, NumSamplers, ppSamplers);
 }
-void STDMETHODCALLTYPE D3D10Device::VSSetShader(ID3D10VertexShader *pVertexShader)
+void    STDMETHODCALLTYPE D3D10Device::VSSetShader(ID3D10VertexShader *pVertexShader)
 {
 	_orig->VSSetShader(pVertexShader);
 }
-void STDMETHODCALLTYPE D3D10Device::DrawIndexed(UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
+void    STDMETHODCALLTYPE D3D10Device::DrawIndexed(UINT IndexCount, UINT StartIndexLocation, INT BaseVertexLocation)
 {
-	for (auto runtime : _runtimes)
-	{
-		runtime->on_draw_call(IndexCount);
-	}
-
 	_orig->DrawIndexed(IndexCount, StartIndexLocation, BaseVertexLocation);
+	_buffer_detection.on_draw(IndexCount);
 }
-void STDMETHODCALLTYPE D3D10Device::Draw(UINT VertexCount, UINT StartVertexLocation)
+void    STDMETHODCALLTYPE D3D10Device::Draw(UINT VertexCount, UINT StartVertexLocation)
 {
-	for (auto runtime : _runtimes)
-	{
-		runtime->on_draw_call(VertexCount);
-	}
-
 	_orig->Draw(VertexCount, StartVertexLocation);
+	_buffer_detection.on_draw(VertexCount);
 }
-void STDMETHODCALLTYPE D3D10Device::PSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer *const *ppConstantBuffers)
+void    STDMETHODCALLTYPE D3D10Device::PSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer *const *ppConstantBuffers)
 {
 	_orig->PSSetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
 }
-void STDMETHODCALLTYPE D3D10Device::IASetInputLayout(ID3D10InputLayout *pInputLayout)
+void    STDMETHODCALLTYPE D3D10Device::IASetInputLayout(ID3D10InputLayout *pInputLayout)
 {
 	_orig->IASetInputLayout(pInputLayout);
 }
-void STDMETHODCALLTYPE D3D10Device::IASetVertexBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer *const *ppVertexBuffers, const UINT *pStrides, const UINT *pOffsets)
+void    STDMETHODCALLTYPE D3D10Device::IASetVertexBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer *const *ppVertexBuffers, const UINT *pStrides, const UINT *pOffsets)
 {
 	_orig->IASetVertexBuffers(StartSlot, NumBuffers, ppVertexBuffers, pStrides, pOffsets);
 }
-void STDMETHODCALLTYPE D3D10Device::IASetIndexBuffer(ID3D10Buffer *pIndexBuffer, DXGI_FORMAT Format, UINT Offset)
+void    STDMETHODCALLTYPE D3D10Device::IASetIndexBuffer(ID3D10Buffer *pIndexBuffer, DXGI_FORMAT Format, UINT Offset)
 {
 	_orig->IASetIndexBuffer(pIndexBuffer, Format, Offset);
 }
-void STDMETHODCALLTYPE D3D10Device::DrawIndexedInstanced(UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation, UINT StartInstanceLocation)
+void    STDMETHODCALLTYPE D3D10Device::DrawIndexedInstanced(UINT IndexCountPerInstance, UINT InstanceCount, UINT StartIndexLocation, INT BaseVertexLocation, UINT StartInstanceLocation)
 {
-	for (auto runtime : _runtimes)
-	{
-		runtime->on_draw_call(IndexCountPerInstance * InstanceCount);
-	}
-
 	_orig->DrawIndexedInstanced(IndexCountPerInstance, InstanceCount, StartIndexLocation, BaseVertexLocation, StartInstanceLocation);
+	_buffer_detection.on_draw(IndexCountPerInstance * InstanceCount);
 }
-void STDMETHODCALLTYPE D3D10Device::DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
+void    STDMETHODCALLTYPE D3D10Device::DrawInstanced(UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation)
 {
-	for (auto runtime : _runtimes)
-	{
-		runtime->on_draw_call(VertexCountPerInstance * InstanceCount);
-	}
-
 	_orig->DrawInstanced(VertexCountPerInstance, InstanceCount, StartVertexLocation, StartInstanceLocation);
+	_buffer_detection.on_draw(VertexCountPerInstance * InstanceCount);
 }
-void STDMETHODCALLTYPE D3D10Device::GSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer *const *ppConstantBuffers)
+void    STDMETHODCALLTYPE D3D10Device::GSSetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer *const *ppConstantBuffers)
 {
 	_orig->GSSetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
 }
-void STDMETHODCALLTYPE D3D10Device::GSSetShader(ID3D10GeometryShader *pShader)
+void    STDMETHODCALLTYPE D3D10Device::GSSetShader(ID3D10GeometryShader *pShader)
 {
 	_orig->GSSetShader(pShader);
 }
-void STDMETHODCALLTYPE D3D10Device::IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY Topology)
+void    STDMETHODCALLTYPE D3D10Device::IASetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY Topology)
 {
 	_orig->IASetPrimitiveTopology(Topology);
 }
-void STDMETHODCALLTYPE D3D10Device::VSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView *const *ppShaderResourceViews)
+void    STDMETHODCALLTYPE D3D10Device::VSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView *const *ppShaderResourceViews)
 {
 	_orig->VSSetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
 }
-void STDMETHODCALLTYPE D3D10Device::VSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState *const *ppSamplers)
+void    STDMETHODCALLTYPE D3D10Device::VSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState *const *ppSamplers)
 {
 	_orig->VSSetSamplers(StartSlot, NumSamplers, ppSamplers);
 }
-void STDMETHODCALLTYPE D3D10Device::SetPredication(ID3D10Predicate *pPredicate, BOOL PredicateValue)
+void    STDMETHODCALLTYPE D3D10Device::SetPredication(ID3D10Predicate *pPredicate, BOOL PredicateValue)
 {
 	_orig->SetPredication(pPredicate, PredicateValue);
 }
-void STDMETHODCALLTYPE D3D10Device::GSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView *const *ppShaderResourceViews)
+void    STDMETHODCALLTYPE D3D10Device::GSSetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView *const *ppShaderResourceViews)
 {
 	_orig->GSSetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
 }
-void STDMETHODCALLTYPE D3D10Device::GSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState *const *ppSamplers)
+void    STDMETHODCALLTYPE D3D10Device::GSSetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState *const *ppSamplers)
 {
 	_orig->GSSetSamplers(StartSlot, NumSamplers, ppSamplers);
 }
-void STDMETHODCALLTYPE D3D10Device::OMSetRenderTargets(UINT NumViews, ID3D10RenderTargetView *const *ppRenderTargetViews, ID3D10DepthStencilView *pDepthStencilView)
+void    STDMETHODCALLTYPE D3D10Device::OMSetRenderTargets(UINT NumViews, ID3D10RenderTargetView *const *ppRenderTargetViews, ID3D10DepthStencilView *pDepthStencilView)
 {
-	if (pDepthStencilView != nullptr)
-	{
-		for (auto runtime : _runtimes)
-		{
-			runtime->on_set_depthstencil_view(pDepthStencilView);
-		}
-	}
-
 	_orig->OMSetRenderTargets(NumViews, ppRenderTargetViews, pDepthStencilView);
 }
-void STDMETHODCALLTYPE D3D10Device::OMSetBlendState(ID3D10BlendState *pBlendState, const FLOAT BlendFactor[4], UINT SampleMask)
+void    STDMETHODCALLTYPE D3D10Device::OMSetBlendState(ID3D10BlendState *pBlendState, const FLOAT BlendFactor[4], UINT SampleMask)
 {
 	_orig->OMSetBlendState(pBlendState, BlendFactor, SampleMask);
 }
-void STDMETHODCALLTYPE D3D10Device::OMSetDepthStencilState(ID3D10DepthStencilState *pDepthStencilState, UINT StencilRef)
+void    STDMETHODCALLTYPE D3D10Device::OMSetDepthStencilState(ID3D10DepthStencilState *pDepthStencilState, UINT StencilRef)
 {
 	_orig->OMSetDepthStencilState(pDepthStencilState, StencilRef);
 }
-void STDMETHODCALLTYPE D3D10Device::SOSetTargets(UINT NumBuffers, ID3D10Buffer *const *ppSOTargets, const UINT *pOffsets)
+void    STDMETHODCALLTYPE D3D10Device::SOSetTargets(UINT NumBuffers, ID3D10Buffer *const *ppSOTargets, const UINT *pOffsets)
 {
 	_orig->SOSetTargets(NumBuffers, ppSOTargets, pOffsets);
 }
-void STDMETHODCALLTYPE D3D10Device::DrawAuto()
+void    STDMETHODCALLTYPE D3D10Device::DrawAuto()
 {
 	_orig->DrawAuto();
+	_buffer_detection.on_draw(0);
 }
-void STDMETHODCALLTYPE D3D10Device::RSSetState(ID3D10RasterizerState *pRasterizerState)
+void    STDMETHODCALLTYPE D3D10Device::RSSetState(ID3D10RasterizerState *pRasterizerState)
 {
 	_orig->RSSetState(pRasterizerState);
 }
-void STDMETHODCALLTYPE D3D10Device::RSSetViewports(UINT NumViewports, const D3D10_VIEWPORT *pViewports)
+void    STDMETHODCALLTYPE D3D10Device::RSSetViewports(UINT NumViewports, const D3D10_VIEWPORT *pViewports)
 {
 	_orig->RSSetViewports(NumViewports, pViewports);
 }
-void STDMETHODCALLTYPE D3D10Device::RSSetScissorRects(UINT NumRects, const D3D10_RECT *pRects)
+void    STDMETHODCALLTYPE D3D10Device::RSSetScissorRects(UINT NumRects, const D3D10_RECT *pRects)
 {
 	_orig->RSSetScissorRects(NumRects, pRects);
 }
-void STDMETHODCALLTYPE D3D10Device::CopySubresourceRegion(ID3D10Resource *pDstResource, UINT DstSubresource, UINT DstX, UINT DstY, UINT DstZ, ID3D10Resource *pSrcResource, UINT SrcSubresource, const D3D10_BOX *pSrcBox)
+void    STDMETHODCALLTYPE D3D10Device::CopySubresourceRegion(ID3D10Resource *pDstResource, UINT DstSubresource, UINT DstX, UINT DstY, UINT DstZ, ID3D10Resource *pSrcResource, UINT SrcSubresource, const D3D10_BOX *pSrcBox)
 {
 	_orig->CopySubresourceRegion(pDstResource, DstSubresource, DstX, DstY, DstZ, pSrcResource, SrcSubresource, pSrcBox);
 }
-void STDMETHODCALLTYPE D3D10Device::CopyResource(ID3D10Resource *pDstResource, ID3D10Resource *pSrcResource)
+void    STDMETHODCALLTYPE D3D10Device::CopyResource(ID3D10Resource *pDstResource, ID3D10Resource *pSrcResource)
 {
-	for (auto runtime : _runtimes)
-	{
-		runtime->on_copy_resource(pDstResource, pSrcResource);
-	}
-
 	_orig->CopyResource(pDstResource, pSrcResource);
 }
-void STDMETHODCALLTYPE D3D10Device::UpdateSubresource(ID3D10Resource *pDstResource, UINT DstSubresource, const D3D10_BOX *pDstBox, const void *pSrcData, UINT SrcRowPitch, UINT SrcDepthPitch)
+void    STDMETHODCALLTYPE D3D10Device::UpdateSubresource(ID3D10Resource *pDstResource, UINT DstSubresource, const D3D10_BOX *pDstBox, const void *pSrcData, UINT SrcRowPitch, UINT SrcDepthPitch)
 {
 	_orig->UpdateSubresource(pDstResource, DstSubresource, pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch);
 }
-void STDMETHODCALLTYPE D3D10Device::ClearRenderTargetView(ID3D10RenderTargetView *pRenderTargetView, const FLOAT ColorRGBA[4])
+void    STDMETHODCALLTYPE D3D10Device::ClearRenderTargetView(ID3D10RenderTargetView *pRenderTargetView, const FLOAT ColorRGBA[4])
 {
 	_orig->ClearRenderTargetView(pRenderTargetView, ColorRGBA);
 }
-void STDMETHODCALLTYPE D3D10Device::ClearDepthStencilView(ID3D10DepthStencilView *pDepthStencilView, UINT ClearFlags, FLOAT Depth, UINT8 Stencil)
+void    STDMETHODCALLTYPE D3D10Device::ClearDepthStencilView(ID3D10DepthStencilView *pDepthStencilView, UINT ClearFlags, FLOAT Depth, UINT8 Stencil)
 {
-	for (auto runtime : _runtimes)
-	{
-		runtime->on_clear_depthstencil_view(pDepthStencilView);
-	}
-
+#if RESHADE_DX10_CAPTURE_DEPTH_BUFFERS
+	_buffer_detection.on_clear_depthstencil(ClearFlags, pDepthStencilView);
+#endif
 	_orig->ClearDepthStencilView(pDepthStencilView, ClearFlags, Depth, Stencil);
 }
-void STDMETHODCALLTYPE D3D10Device::GenerateMips(ID3D10ShaderResourceView *pShaderResourceView)
+void    STDMETHODCALLTYPE D3D10Device::GenerateMips(ID3D10ShaderResourceView *pShaderResourceView)
 {
 	_orig->GenerateMips(pShaderResourceView);
 }
-void STDMETHODCALLTYPE D3D10Device::ResolveSubresource(ID3D10Resource *pDstResource, UINT DstSubresource, ID3D10Resource *pSrcResource, UINT SrcSubresource, DXGI_FORMAT Format)
+void    STDMETHODCALLTYPE D3D10Device::ResolveSubresource(ID3D10Resource *pDstResource, UINT DstSubresource, ID3D10Resource *pSrcResource, UINT SrcSubresource, DXGI_FORMAT Format)
 {
 	_orig->ResolveSubresource(pDstResource, DstSubresource, pSrcResource, SrcSubresource, Format);
 }
-void STDMETHODCALLTYPE D3D10Device::VSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer **ppConstantBuffers)
+void    STDMETHODCALLTYPE D3D10Device::VSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer **ppConstantBuffers)
 {
 	_orig->VSGetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
 }
-void STDMETHODCALLTYPE D3D10Device::PSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView **ppShaderResourceViews)
+void    STDMETHODCALLTYPE D3D10Device::PSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView **ppShaderResourceViews)
 {
 	_orig->PSGetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
 }
-void STDMETHODCALLTYPE D3D10Device::PSGetShader(ID3D10PixelShader **ppPixelShader)
+void    STDMETHODCALLTYPE D3D10Device::PSGetShader(ID3D10PixelShader **ppPixelShader)
 {
 	_orig->PSGetShader(ppPixelShader);
 }
-void STDMETHODCALLTYPE D3D10Device::PSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState **ppSamplers)
+void    STDMETHODCALLTYPE D3D10Device::PSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState **ppSamplers)
 {
 	_orig->PSGetSamplers(StartSlot, NumSamplers, ppSamplers);
 }
-void STDMETHODCALLTYPE D3D10Device::VSGetShader(ID3D10VertexShader **ppVertexShader)
+void    STDMETHODCALLTYPE D3D10Device::VSGetShader(ID3D10VertexShader **ppVertexShader)
 {
 	_orig->VSGetShader(ppVertexShader);
 }
-void STDMETHODCALLTYPE D3D10Device::PSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer **ppConstantBuffers)
+void    STDMETHODCALLTYPE D3D10Device::PSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer **ppConstantBuffers)
 {
 	_orig->PSGetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
 }
-void STDMETHODCALLTYPE D3D10Device::IAGetInputLayout(ID3D10InputLayout **ppInputLayout)
+void    STDMETHODCALLTYPE D3D10Device::IAGetInputLayout(ID3D10InputLayout **ppInputLayout)
 {
 	_orig->IAGetInputLayout(ppInputLayout);
 }
-void STDMETHODCALLTYPE D3D10Device::IAGetVertexBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer **ppVertexBuffers, UINT *pStrides, UINT *pOffsets)
+void    STDMETHODCALLTYPE D3D10Device::IAGetVertexBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer **ppVertexBuffers, UINT *pStrides, UINT *pOffsets)
 {
 	_orig->IAGetVertexBuffers(StartSlot, NumBuffers, ppVertexBuffers, pStrides, pOffsets);
 }
-void STDMETHODCALLTYPE D3D10Device::IAGetIndexBuffer(ID3D10Buffer **pIndexBuffer, DXGI_FORMAT *Format, UINT *Offset)
+void    STDMETHODCALLTYPE D3D10Device::IAGetIndexBuffer(ID3D10Buffer **pIndexBuffer, DXGI_FORMAT *Format, UINT *Offset)
 {
 	_orig->IAGetIndexBuffer(pIndexBuffer, Format, Offset);
 }
-void STDMETHODCALLTYPE D3D10Device::GSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer **ppConstantBuffers)
+void    STDMETHODCALLTYPE D3D10Device::GSGetConstantBuffers(UINT StartSlot, UINT NumBuffers, ID3D10Buffer **ppConstantBuffers)
 {
 	_orig->GSGetConstantBuffers(StartSlot, NumBuffers, ppConstantBuffers);
 }
-void STDMETHODCALLTYPE D3D10Device::GSGetShader(ID3D10GeometryShader **ppGeometryShader)
+void    STDMETHODCALLTYPE D3D10Device::GSGetShader(ID3D10GeometryShader **ppGeometryShader)
 {
 	_orig->GSGetShader(ppGeometryShader);
 }
-void STDMETHODCALLTYPE D3D10Device::IAGetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY *pTopology)
+void    STDMETHODCALLTYPE D3D10Device::IAGetPrimitiveTopology(D3D10_PRIMITIVE_TOPOLOGY *pTopology)
 {
 	_orig->IAGetPrimitiveTopology(pTopology);
 }
-void STDMETHODCALLTYPE D3D10Device::VSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView **ppShaderResourceViews)
+void    STDMETHODCALLTYPE D3D10Device::VSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView **ppShaderResourceViews)
 {
 	_orig->VSGetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
 }
-void STDMETHODCALLTYPE D3D10Device::VSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState **ppSamplers)
+void    STDMETHODCALLTYPE D3D10Device::VSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState **ppSamplers)
 {
 	_orig->VSGetSamplers(StartSlot, NumSamplers, ppSamplers);
 }
-void STDMETHODCALLTYPE D3D10Device::GetPredication(ID3D10Predicate **ppPredicate, BOOL *pPredicateValue)
+void    STDMETHODCALLTYPE D3D10Device::GetPredication(ID3D10Predicate **ppPredicate, BOOL *pPredicateValue)
 {
 	_orig->GetPredication(ppPredicate, pPredicateValue);
 }
-void STDMETHODCALLTYPE D3D10Device::GSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView **ppShaderResourceViews)
+void    STDMETHODCALLTYPE D3D10Device::GSGetShaderResources(UINT StartSlot, UINT NumViews, ID3D10ShaderResourceView **ppShaderResourceViews)
 {
 	_orig->GSGetShaderResources(StartSlot, NumViews, ppShaderResourceViews);
 }
-void STDMETHODCALLTYPE D3D10Device::GSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState **ppSamplers)
+void    STDMETHODCALLTYPE D3D10Device::GSGetSamplers(UINT StartSlot, UINT NumSamplers, ID3D10SamplerState **ppSamplers)
 {
 	_orig->GSGetSamplers(StartSlot, NumSamplers, ppSamplers);
 }
-void STDMETHODCALLTYPE D3D10Device::OMGetRenderTargets(UINT NumViews, ID3D10RenderTargetView **ppRenderTargetViews, ID3D10DepthStencilView **ppDepthStencilView)
+void    STDMETHODCALLTYPE D3D10Device::OMGetRenderTargets(UINT NumViews, ID3D10RenderTargetView **ppRenderTargetViews, ID3D10DepthStencilView **ppDepthStencilView)
 {
 	_orig->OMGetRenderTargets(NumViews, ppRenderTargetViews, ppDepthStencilView);
-
-	if (ppDepthStencilView != nullptr)
-	{
-		for (auto runtime : _runtimes)
-		{
-			runtime->on_get_depthstencil_view(*ppDepthStencilView);
-		}
-	}
 }
-void STDMETHODCALLTYPE D3D10Device::OMGetBlendState(ID3D10BlendState **ppBlendState, FLOAT BlendFactor[4], UINT *pSampleMask)
+void    STDMETHODCALLTYPE D3D10Device::OMGetBlendState(ID3D10BlendState **ppBlendState, FLOAT BlendFactor[4], UINT *pSampleMask)
 {
 	_orig->OMGetBlendState(ppBlendState, BlendFactor, pSampleMask);
 }
-void STDMETHODCALLTYPE D3D10Device::OMGetDepthStencilState(ID3D10DepthStencilState **ppDepthStencilState, UINT *pStencilRef)
+void    STDMETHODCALLTYPE D3D10Device::OMGetDepthStencilState(ID3D10DepthStencilState **ppDepthStencilState, UINT *pStencilRef)
 {
 	_orig->OMGetDepthStencilState(ppDepthStencilState, pStencilRef);
 }
-void STDMETHODCALLTYPE D3D10Device::SOGetTargets(UINT NumBuffers, ID3D10Buffer **ppSOTargets, UINT *pOffsets)
+void    STDMETHODCALLTYPE D3D10Device::SOGetTargets(UINT NumBuffers, ID3D10Buffer **ppSOTargets, UINT *pOffsets)
 {
 	_orig->SOGetTargets(NumBuffers, ppSOTargets, pOffsets);
 }
-void STDMETHODCALLTYPE D3D10Device::RSGetState(ID3D10RasterizerState **ppRasterizerState)
+void    STDMETHODCALLTYPE D3D10Device::RSGetState(ID3D10RasterizerState **ppRasterizerState)
 {
 	_orig->RSGetState(ppRasterizerState);
 }
-void STDMETHODCALLTYPE D3D10Device::RSGetViewports(UINT *NumViewports, D3D10_VIEWPORT *pViewports)
+void    STDMETHODCALLTYPE D3D10Device::RSGetViewports(UINT *NumViewports, D3D10_VIEWPORT *pViewports)
 {
 	_orig->RSGetViewports(NumViewports, pViewports);
 }
-void STDMETHODCALLTYPE D3D10Device::RSGetScissorRects(UINT *NumRects, D3D10_RECT *pRects)
+void    STDMETHODCALLTYPE D3D10Device::RSGetScissorRects(UINT *NumRects, D3D10_RECT *pRects)
 {
 	_orig->RSGetScissorRects(NumRects, pRects);
 }
@@ -371,7 +334,7 @@ HRESULT STDMETHODCALLTYPE D3D10Device::SetExceptionMode(UINT RaiseFlags)
 {
 	return _orig->SetExceptionMode(RaiseFlags);
 }
-UINT STDMETHODCALLTYPE D3D10Device::GetExceptionMode()
+UINT    STDMETHODCALLTYPE D3D10Device::GetExceptionMode()
 {
 	return _orig->GetExceptionMode();
 }
@@ -387,11 +350,11 @@ HRESULT STDMETHODCALLTYPE D3D10Device::SetPrivateDataInterface(REFGUID guid, con
 {
 	return _orig->SetPrivateDataInterface(guid, pData);
 }
-void STDMETHODCALLTYPE D3D10Device::ClearState()
+void    STDMETHODCALLTYPE D3D10Device::ClearState()
 {
 	_orig->ClearState();
 }
-void STDMETHODCALLTYPE D3D10Device::Flush()
+void    STDMETHODCALLTYPE D3D10Device::Flush()
 {
 	_orig->Flush();
 }
@@ -405,7 +368,23 @@ HRESULT STDMETHODCALLTYPE D3D10Device::CreateTexture1D(const D3D10_TEXTURE1D_DES
 }
 HRESULT STDMETHODCALLTYPE D3D10Device::CreateTexture2D(const D3D10_TEXTURE2D_DESC *pDesc, const D3D10_SUBRESOURCE_DATA *pInitialData, ID3D10Texture2D **ppTexture2D)
 {
-	return _orig->CreateTexture2D(pDesc, pInitialData, ppTexture2D);
+	assert(pDesc != nullptr);
+
+	// Add D3D10_BIND_SHADER_RESOURCE flag to all depth stencil textures so that we can access them in post-processing shaders
+	D3D10_TEXTURE2D_DESC new_desc = *pDesc;
+	if (0 != (new_desc.BindFlags & D3D10_BIND_DEPTH_STENCIL))
+	{
+		new_desc.Format = make_dxgi_format_typeless(new_desc.Format);
+		new_desc.BindFlags |= D3D10_BIND_SHADER_RESOURCE;
+	}
+
+	const HRESULT hr = _orig->CreateTexture2D(&new_desc, pInitialData, ppTexture2D);
+	if (FAILED(hr))
+	{
+		LOG(WARN) << "ID3D10Device::CreateTexture2D failed with error code " << hr << '.';
+	}
+
+	return hr;
 }
 HRESULT STDMETHODCALLTYPE D3D10Device::CreateTexture3D(const D3D10_TEXTURE3D_DESC *pDesc, const D3D10_SUBRESOURCE_DATA *pInitialData, ID3D10Texture3D **ppTexture3D)
 {
@@ -413,7 +392,42 @@ HRESULT STDMETHODCALLTYPE D3D10Device::CreateTexture3D(const D3D10_TEXTURE3D_DES
 }
 HRESULT STDMETHODCALLTYPE D3D10Device::CreateShaderResourceView(ID3D10Resource *pResource, const D3D10_SHADER_RESOURCE_VIEW_DESC *pDesc, ID3D10ShaderResourceView **ppSRView)
 {
-	return _orig->CreateShaderResourceView(pResource, pDesc, ppSRView);
+	D3D10_SHADER_RESOURCE_VIEW_DESC new_desc =
+		pDesc != nullptr ? *pDesc : D3D10_SHADER_RESOURCE_VIEW_DESC {};
+
+	// A view cannot be created with a typeless format (which was set 'CreateTexture2D'), so fix it
+	if (pDesc == nullptr || pDesc->Format == DXGI_FORMAT_UNKNOWN)
+	{
+		D3D10_TEXTURE2D_DESC texture_desc;
+		if (com_ptr<ID3D10Texture2D> texture;
+			SUCCEEDED(pResource->QueryInterface(&texture)))
+		{
+			texture->GetDesc(&texture_desc);
+
+			// Only textures with the depth stencil bind flag where modified, so skip all others
+			if (0 != (texture_desc.BindFlags & D3D10_BIND_DEPTH_STENCIL))
+			{
+				new_desc.Format = make_dxgi_format_normal(texture_desc.Format);
+
+				if (pDesc == nullptr) // Only need to set the rest of the fields if the application did not pass in a valid description already
+				{
+					new_desc.ViewDimension = D3D10_SRV_DIMENSION_TEXTURE2D;
+					new_desc.Texture2D.MipLevels = texture_desc.MipLevels;
+					new_desc.Texture2D.MostDetailedMip = 0;
+				}
+
+				pDesc = &new_desc;
+			}
+		}
+	}
+
+	const HRESULT hr = _orig->CreateShaderResourceView(pResource, pDesc, ppSRView);
+	if (FAILED(hr))
+	{
+		LOG(WARN) << "ID3D10Device::CreateShaderResourceView failed with error code " << hr << '.';
+	}
+
+	return hr;
 }
 HRESULT STDMETHODCALLTYPE D3D10Device::CreateRenderTargetView(ID3D10Resource *pResource, const D3D10_RENDER_TARGET_VIEW_DESC *pDesc, ID3D10RenderTargetView **ppRTView)
 {
@@ -421,7 +435,37 @@ HRESULT STDMETHODCALLTYPE D3D10Device::CreateRenderTargetView(ID3D10Resource *pR
 }
 HRESULT STDMETHODCALLTYPE D3D10Device::CreateDepthStencilView(ID3D10Resource *pResource, const D3D10_DEPTH_STENCIL_VIEW_DESC *pDesc, ID3D10DepthStencilView **ppDepthStencilView)
 {
-	return _orig->CreateDepthStencilView(pResource, pDesc, ppDepthStencilView);
+	D3D10_DEPTH_STENCIL_VIEW_DESC new_desc =
+		pDesc != nullptr ? *pDesc : D3D10_DEPTH_STENCIL_VIEW_DESC {};
+
+	// A view cannot be created with a typeless format (which was set in 'CreateTexture2D'), so fix it
+	if (pDesc == nullptr || pDesc->Format == DXGI_FORMAT_UNKNOWN)
+	{
+		D3D10_TEXTURE2D_DESC texture_desc;
+		if (com_ptr<ID3D10Texture2D> texture;
+			SUCCEEDED(pResource->QueryInterface(&texture)))
+		{
+			texture->GetDesc(&texture_desc);
+
+			new_desc.Format = make_dxgi_format_dsv(texture_desc.Format);
+
+			if (pDesc == nullptr) // Only need to set the rest of the fields if the application did not pass in a valid description already
+			{
+				new_desc.ViewDimension = D3D10_DSV_DIMENSION_TEXTURE2D;
+				new_desc.Texture2D.MipSlice = 0;
+			}
+
+			pDesc = &new_desc;
+		}
+	}
+
+	const HRESULT hr = _orig->CreateDepthStencilView(pResource, pDesc, ppDepthStencilView);
+	if (FAILED(hr))
+	{
+		LOG(WARN) << "ID3D10Device::CreateDepthStencilView failed with error code " << hr << '.';
+	}
+
+	return hr;
 }
 HRESULT STDMETHODCALLTYPE D3D10Device::CreateInputLayout(const D3D10_INPUT_ELEMENT_DESC *pInputElementDescs, UINT NumElements, const void *pShaderBytecodeWithInputSignature, SIZE_T BytecodeLength, ID3D10InputLayout **ppInputLayout)
 {
@@ -479,7 +523,7 @@ HRESULT STDMETHODCALLTYPE D3D10Device::CheckMultisampleQualityLevels(DXGI_FORMAT
 {
 	return _orig->CheckMultisampleQualityLevels(Format, SampleCount, pNumQualityLevels);
 }
-void STDMETHODCALLTYPE D3D10Device::CheckCounterInfo(D3D10_COUNTER_INFO *pCounterInfo)
+void    STDMETHODCALLTYPE D3D10Device::CheckCounterInfo(D3D10_COUNTER_INFO *pCounterInfo)
 {
 	_orig->CheckCounterInfo(pCounterInfo);
 }
@@ -487,7 +531,7 @@ HRESULT STDMETHODCALLTYPE D3D10Device::CheckCounter(const D3D10_COUNTER_DESC *pD
 {
 	return _orig->CheckCounter(pDesc, pType, pActiveCounters, szName, pNameLength, szUnits, pUnitsLength, szDescription, pDescriptionLength);
 }
-UINT STDMETHODCALLTYPE D3D10Device::GetCreationFlags()
+UINT    STDMETHODCALLTYPE D3D10Device::GetCreationFlags()
 {
 	return _orig->GetCreationFlags();
 }
@@ -495,19 +539,51 @@ HRESULT STDMETHODCALLTYPE D3D10Device::OpenSharedResource(HANDLE hResource, REFI
 {
 	return _orig->OpenSharedResource(hResource, ReturnedInterface, ppResource);
 }
-void STDMETHODCALLTYPE D3D10Device::SetTextFilterSize(UINT Width, UINT Height)
+void    STDMETHODCALLTYPE D3D10Device::SetTextFilterSize(UINT Width, UINT Height)
 {
 	_orig->SetTextFilterSize(Width, Height);
 }
-void STDMETHODCALLTYPE D3D10Device::GetTextFilterSize(UINT *pWidth, UINT *pHeight)
+void    STDMETHODCALLTYPE D3D10Device::GetTextFilterSize(UINT *pWidth, UINT *pHeight)
 {
 	_orig->GetTextFilterSize(pWidth, pHeight);
 }
 
-// ID3D10Device1
 HRESULT STDMETHODCALLTYPE D3D10Device::CreateShaderResourceView1(ID3D10Resource *pResource, const D3D10_SHADER_RESOURCE_VIEW_DESC1 *pDesc, ID3D10ShaderResourceView1 **ppSRView)
 {
-	return _orig->CreateShaderResourceView1(pResource, pDesc, ppSRView);
+	D3D10_SHADER_RESOURCE_VIEW_DESC1 new_desc =
+		pDesc != nullptr ? *pDesc : D3D10_SHADER_RESOURCE_VIEW_DESC1 {};
+
+	if (pDesc == nullptr || pDesc->Format == DXGI_FORMAT_UNKNOWN)
+	{
+		D3D10_TEXTURE2D_DESC texture_desc;
+		if (com_ptr<ID3D10Texture2D> texture;
+			SUCCEEDED(pResource->QueryInterface(&texture)))
+		{
+			texture->GetDesc(&texture_desc);
+
+			if (0 != (texture_desc.BindFlags & D3D10_BIND_DEPTH_STENCIL))
+			{
+				new_desc.Format = make_dxgi_format_normal(texture_desc.Format);
+
+				if (pDesc == nullptr)
+				{
+					new_desc.ViewDimension = D3D10_1_SRV_DIMENSION_TEXTURE2D;
+					new_desc.Texture2D.MipLevels = texture_desc.MipLevels;
+					new_desc.Texture2D.MostDetailedMip = 0;
+				}
+
+				pDesc = &new_desc;
+			}
+		}
+	}
+
+	const HRESULT hr = _orig->CreateShaderResourceView1(pResource, pDesc, ppSRView);
+	if (FAILED(hr))
+	{
+		LOG(WARN) << "ID3D10Device1::CreateShaderResourceView1 failed with error code " << hr << '.';
+	}
+
+	return hr;
 }
 HRESULT STDMETHODCALLTYPE D3D10Device::CreateBlendState1(const D3D10_BLEND_DESC1 *pBlendStateDesc, ID3D10BlendState1 **ppBlendState)
 {

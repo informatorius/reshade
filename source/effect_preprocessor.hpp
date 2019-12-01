@@ -8,14 +8,15 @@
 #include <stack>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
+#include <filesystem>
 #include "effect_lexer.hpp"
-#include "filesystem.hpp"
 
 namespace reshadefx
 {
 	/// <summary>
-	/// A C-style pre-processor implementation.
+	/// A C-style preprocessor implementation.
 	/// </summary>
 	class preprocessor
 	{
@@ -23,20 +24,60 @@ namespace reshadefx
 		struct macro
 		{
 			std::string replacement_list;
-			bool is_function_like = false, is_variadic = false;
 			std::vector<std::string> parameters;
+			bool is_variadic = false;
+			bool is_function_like = false;
 		};
 
-		void add_include_path(const reshade::filesystem::path &path);
+		/// <summary>
+		/// Add an include directory to the list of search paths used when resolving #include directives.
+		/// </summary>
+		/// <param name="path">The path to the directory to add.</param>
+		void add_include_path(const std::filesystem::path &path);
+
+		/// <summary>
+		/// Add a new macro definition. This is equal to appending '#define name macro' to this preprocessor instance.
+		/// </summary>
+		/// <param name="name">The name of the macro to define.</param>
+		/// <param name="macro">The definition of the macro function or value.</param>
+		/// <returns></returns>
 		bool add_macro_definition(const std::string &name, const macro &macro);
-		bool add_macro_definition(const std::string &name, const std::string &value = "1");
+		/// <summary>
+		/// Add a new macro value definition. This is equal to appending '#define name macro' to this preprocessor instance.
+		/// </summary>
+		/// <param name="name">The name of the macro to define.</param>
+		/// <param name="value">The value to define that macro to.</param>
+		/// <returns></returns>
+		bool add_macro_definition(const std::string &name, std::string value = "1");
 
+		/// <summary>
+		/// Open the specified file, parse its contents and append them to the output.
+		/// </summary>
+		/// <param name="path">The path to the file to parse.</param>
+		/// <returns>A boolean value indicating whether parsing was successful or not.</returns>
+		bool append_file(const std::filesystem::path &path);
+		/// <summary>
+		/// Parse the specified string and append it to the output.
+		/// </summary>
+		/// <param name="source_code">The string to parse.</param>
+		/// <returns>A boolean value indicating whether parsing was successful or not.</returns>
+		bool append_string(const std::string &source_code);
+
+		/// <summary>
+		/// Get the list of error messages.
+		/// </summary>
+		std::string &errors() { return _errors; }
 		const std::string &errors() const { return _errors; }
-		const std::string &current_output() const { return _output; }
-		const std::vector<std::string> &current_pragmas() const { return _pragmas; }
+		/// <summary>
+		/// Get the current pre-processed output string.
+		/// </summary>
+		std::string &output() { return _output; }
+		const std::string &output() const { return _output; }
 
-		bool run(const reshade::filesystem::path &file_path);
-		bool run(const reshade::filesystem::path &file_path, std::vector<reshade::filesystem::path> &included_files);
+		/// <summary>
+		/// Get a list of all included files.
+		/// </summary>
+		std::vector<std::filesystem::path> included_files() const;
 
 	private:
 		struct if_level
@@ -47,31 +88,22 @@ namespace reshadefx
 		};
 		struct input_level
 		{
-			input_level(const std::string &name, const std::string &text, input_level *parent) :
-				_name(name),
-				_lexer(new lexer(text, false, false, true, false)),
-				_parent(parent)
-			{
-				_next_token.id = tokenid::unknown;
-				_next_token.offset = _next_token.length = 0;
-			}
-
-			std::string _name;
-			std::unique_ptr<lexer> _lexer;
-			token _next_token;
-			size_t _offset;
-			std::stack<if_level> _if_stack;
-			input_level *_parent;
+			std::string name;
+			std::unique_ptr<lexer> lexer;
+			token next_token;
+			std::stack<if_level> if_stack;
+			std::unordered_set<std::string> hidden_macros;
+			input_level *parent;
 		};
 
 		void error(const location &location, const std::string &message);
 		void warning(const location &location, const std::string &message);
 
 		lexer &current_lexer();
-		inline token current_token() const { return _token; }
 		std::stack<if_level> &current_if_stack();
-		if_level &current_if_level();
-		void push(const std::string &input, const std::string &name = std::string());
+
+		void push(std::string input, const std::string &name = std::string());
+
 		bool peek(tokenid token) const;
 		void consume();
 		void consume_until(tokenid token);
@@ -95,18 +127,17 @@ namespace reshadefx
 		bool evaluate_expression();
 		bool evaluate_identifier_as_macro();
 
-		void expand_macro(const macro &macro, const std::vector<std::string> &arguments, std::string &out);
+		void expand_macro(const std::string &name, const macro &macro, const std::vector<std::string> &arguments, std::string &out);
 		void create_macro_replacement_list(macro &macro);
 
 		bool _success = true;
 		token _token;
-		std::stack<input_level> _input_stack;
+		std::vector<input_level> _input_stack;
 		location _output_location;
 		std::string _output, _errors, _current_token_raw_data;
 		int _recursion_count = 0;
 		std::unordered_map<std::string, macro> _macros;
-		std::vector<std::string> _pragmas;
-		std::vector<reshade::filesystem::path> _include_paths;
+		std::vector<std::filesystem::path> _include_paths;
 		std::unordered_map<std::string, std::string> _filecache;
 	};
 }

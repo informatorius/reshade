@@ -6,99 +6,85 @@
 #pragma once
 
 #include <assert.h>
-#include <functional>
 
 template <typename T>
 class com_ptr
 {
 public:
 	com_ptr()
-		: _object(nullptr) { }
+		: _object(nullptr) {}
 	com_ptr(std::nullptr_t)
-		: _object(nullptr) { }
+		: _object(nullptr) {}
 	com_ptr(T *object, bool own = false)
 		: _object(object)
 	{
 		if (!own && _object != nullptr)
-		{
 			_object->AddRef();
-		}
 	}
 	com_ptr(const com_ptr<T> &ptr)
-		: _object(nullptr)
-	{
-		reset(ptr._object);
-	}
+		: _object(nullptr) { reset(ptr._object); }
 	com_ptr(com_ptr<T> &&ptr)
-		: _object(nullptr)
-	{
-		std::swap(_object, ptr._object);
-	}
-	~com_ptr()
-	{
-		reset();
-	}
+		: _object(nullptr) { operator=(std::move(ptr)); }
+	~com_ptr() { reset(); }
 
+	/// <summary>
+	/// Returns the stored pointer to the managed object.
+	/// </summary>
+	T *get() const { return _object; }
+
+	/// <summary>
+	/// Returns the current COM reference count of the managed object.
+	/// </summary>
 	unsigned long ref_count() const
 	{
 		return _object->AddRef(), _object->Release();
 	}
 
-	inline T *get() const
+	/// <summary>
+	/// Returns the stored pointer and releases ownership without decreasing the reference count.
+	/// </summary>
+	T *release()
 	{
-		return _object;
-	}
-	T &operator*() const
-	{
-		assert(_object != nullptr);
-
-		return *_object;
-	}
-	T *operator->() const
-	{
-		assert(_object != nullptr);
-
-		return _object;
-	}
-	T **operator&() throw()
-	{
-		assert(_object == nullptr);
-
-		return &_object;
+		T *const object = _object;
+		_object = nullptr;
+		return object;
 	}
 
+	/// <summary>
+	/// Replaces the managed object.
+	/// </summary>
+	/// <param name="object">The new object to manage and take ownership and add a reference to.</param>
 	void reset(T *object = nullptr)
 	{
 		if (_object != nullptr)
-		{
 			_object->Release();
-		}
-
 		_object = object;
-
 		if (_object != nullptr)
-		{
 			_object->AddRef();
-		}
 	}
+
+	// Overloaded pointer operators which operate on the managed object.
+	T &operator*() const { assert(_object != nullptr); return *_object; }
+	T *operator->() const { assert(_object != nullptr); return _object; }
+
+	// This should only be called on uninitialized objects, e.g. when passed into 'QueryInterface' or creation functions.
+	T **operator&() { assert(_object == nullptr); return &_object; }
+
 	com_ptr<T> &operator=(T *object)
 	{
 		reset(object);
-
 		return *this;
 	}
 	com_ptr<T> &operator=(const com_ptr<T> &copy)
 	{
 		reset(copy._object);
-
 		return *this;
 	}
 	com_ptr<T> &operator=(com_ptr<T> &&move)
 	{
+		// Clear the current object first
 		if (_object != nullptr)
-		{
 			_object->Release();
-		}
 
 		_object = move._object;
 		move._object = nullptr;
@@ -106,34 +92,21 @@ public:
 		return *this;
 	}
 
-	bool operator==(T *other) const
-	{
-		return _object == other;
-	}
-	bool operator==(const com_ptr<T> &other) const
-	{
-		return _object == other._object;
-	}
-	friend bool operator==(T *left, const com_ptr<T> &right)
-	{
-		return right.operator==(left);
-	}
-	bool operator!=(T *other) const
-	{
-		return _object != other;
-	}
-	bool operator!=(const com_ptr<T> &other) const
-	{
-		return _object != other._object;
-	}
-	friend bool operator!=(T *left, const com_ptr<T> &right)
-	{
-		return right.operator!=(left);
-	}
+	bool operator==(const T *rhs) const { return _object == rhs; }
+	bool operator==(const com_ptr<T> &rhs) const { return _object == rhs._object; }
+	friend bool operator==(const T *lhs, const com_ptr<T> &rhs) { return rhs.operator==(lhs); }
+	bool operator!=(const T *rhs) const { return _object != rhs; }
+	bool operator!=(const com_ptr<T> &rhs) const { return _object != rhs._object; }
+	friend bool operator!=(const T *lhs, const com_ptr<T> &rhs) { return rhs.operator!=(lhs); }
+
+	// Default operator used for sorting
+	friend bool operator< (const com_ptr<T> &lhs, const com_ptr<T> &rhs) { return lhs._object < rhs._object; }
 
 private:
 	T *_object;
 };
+
+#include <functional> // std::hash
 
 namespace std
 {

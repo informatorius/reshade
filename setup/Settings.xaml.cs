@@ -1,9 +1,7 @@
 ﻿using System;
 using System.Globalization;
 using System.IO;
-using System.Linq;
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Markup;
 using Microsoft.Win32;
@@ -13,21 +11,12 @@ namespace ReShade.Setup
 {
 	public partial class SettingsWindow
 	{
-		private const string IniSectionName = "GENERAL";
-
 		private readonly string _configFilePath;
 
 		public SettingsWindow(string configPath)
 		{
 			InitializeComponent();
 			_configFilePath = configPath;
-
-			Presets.TextChanged += (s, e) =>
-			{
-				PresetOptions.Collection = (Presets.Text ?? "").Split(',')
-					.Where(f => !string.IsNullOrWhiteSpace(f))
-					.Select((f, i) => new PresetComboItem { Text = Path.GetFileName(f), Value = i });
-			};
 
 			BtnSave.Click += (s, e) => { Save(); Close(); };
 			BtnReload.Click += (s, e) => Load();
@@ -36,82 +25,75 @@ namespace ReShade.Setup
 			Load();
 		}
 
-		private void WriteValue(string key, string value)
-		{
-			IniFile.WriteValue(_configFilePath, IniSectionName, key, NullIfBlank(value));
-		}
-
-		private string ReadValue(string key, string defaultValue = null)
-		{
-			string value = IniFile.ReadValue(_configFilePath, IniSectionName, key, defaultValue);
-			return NullIfBlank(value) ?? defaultValue;
-		}
-
 		private void Save()
 		{
-			WriteValue("PresetFiles", Presets.Text);
-			WriteValue("CurrentPreset", PresetSelect.SelectedValue?.ToString());
-			WriteValue("EffectSearchPaths", EffectsPath.Text);
-			WriteValue("TextureSearchPaths", TexturesPath.Text);
-			WriteValue("ScreenshotPath", ScreenshotsPath.Text);
+			var iniFile = new IniFile(_configFilePath);
 
-			WriteValue("PerformanceMode", CheckboxValue(PerformanceMode.IsChecked));
-			WriteValue("ShowFPS", CheckboxValue(ShowFps.IsChecked));
-			WriteValue("ShowClock", CheckboxValue(ShowClock.IsChecked));
+			iniFile.SetValue("GENERAL", "CurrentPresetPath", Preset.Text);
+			iniFile.SetValue("GENERAL", "EffectSearchPaths", EffectsPath.Text);
+			iniFile.SetValue("GENERAL", "TextureSearchPaths", TexturesPath.Text);
+			iniFile.SetValue("GENERAL", "ScreenshotPath", ScreenshotPath.Text);
 
-			string tutProgress = ReadValue("TutorialProgress", "0");
+			iniFile.SetValue("GENERAL", "PerformanceMode", CheckboxValue(PerformanceMode.IsChecked));
+			iniFile.SetValue("GENERAL", "ShowFPS", CheckboxValue(ShowFps.IsChecked));
+			iniFile.SetValue("GENERAL", "ShowClock", CheckboxValue(ShowClock.IsChecked));
+
+			string tutProgress = iniFile.GetString("GENERAL", "TutorialProgress", "0");
 			var skipTut = SkipTut.IsChecked;
-			WriteValue("TutorialProgress", skipTut.HasValue ? (skipTut.Value ? "4" : "0") : tutProgress);
+			iniFile.SetValue("GENERAL", "TutorialProgress", skipTut.HasValue ? (skipTut.Value ? "4" : "0") : tutProgress);
+
+			iniFile.Save();
 		}
 
 		private void Load()
 		{
-			if (File.Exists(_configFilePath))
+			if (!File.Exists(_configFilePath))
+				return;
+
+			var iniFile = new IniFile(_configFilePath);
+
+			Preset.Text = iniFile.GetString("GENERAL", "CurrentPresetPath");
+			EffectsPath.Text = iniFile.GetString("GENERAL", "EffectSearchPaths");
+			TexturesPath.Text = iniFile.GetString("GENERAL", "TextureSearchPaths");
+			ScreenshotPath.Text = iniFile.GetString("GENERAL", "ScreenshotPath");
+
+			PerformanceMode.IsChecked = iniFile.GetString("GENERAL", "PerformanceMode") == "1";
+			ShowFps.IsChecked = iniFile.GetString("GENERAL", "ShowFPS") == "1";
+			ShowClock.IsChecked = iniFile.GetString("GENERAL", "ShowClock") == "1";
+
+			string tutProgress = iniFile.GetString("GENERAL", "TutorialProgress", "0");
+			if (tutProgress == "0" || tutProgress == "4")
 			{
-				Presets.Text = ReadValue("PresetFiles");
-				PresetSelect.SelectedIndex = Convert.ToInt32(ReadValue("CurrentPreset", "-1")) + 1;
-				EffectsPath.Text = ReadValue("EffectSearchPaths");
-				TexturesPath.Text = ReadValue("TextureSearchPaths");
-				ScreenshotsPath.Text = ReadValue("ScreenshotPath");
-
-				PerformanceMode.IsChecked = ReadValue("PerformanceMode") == "1";
-				ShowFps.IsChecked = ReadValue("ShowFPS") == "1";
-				ShowClock.IsChecked = ReadValue("ShowClock") == "1";
-
-				string tutProgress = ReadValue("TutorialProgress", "0");
-				if (tutProgress == "0" || tutProgress == "4")
-				{
-					SkipTut.IsThreeState = false;
-					SkipTut.IsChecked = tutProgress == "4";
-					SkipTut.ToolTip = null;
-				}
-				else
-				{
-					SkipTut.IsThreeState = true;
-					SkipTut.IsChecked = null;
-					SkipTut.ToolTip = "Neutral means keep pre-existing progress";
-				}
+				SkipTut.IsThreeState = false;
+				SkipTut.IsChecked = tutProgress == "4";
+				SkipTut.ToolTip = null;
+			}
+			else
+			{
+				SkipTut.IsThreeState = true;
+				SkipTut.IsChecked = null;
+				SkipTut.ToolTip = "Neutral means keep pre-existing progress";
 			}
 		}
 
-		private void BtnPresets_Clicked(object sender, RoutedEventArgs e)
+		private void BtnPreset_Clicked(object sender, RoutedEventArgs e)
 		{
-			string origFirstValue = (Presets.Text ?? "").Split(',')[0];
+			string origFirstValue = (Preset.Text ?? "").Split(',')[0];
 
 			var dlg = new OpenFileDialog
 			{
 				CheckFileExists = false,
 				CheckPathExists = true,
 				Multiselect = true,
-				Filter = "Config Files (*.ini, *.txt)|*.ini;*.txt",
+				Filter = "Preset Files (*.ini, *.txt)|*.ini;*.txt",
 				DefaultExt = ".ini",
 				InitialDirectory = string.IsNullOrWhiteSpace(origFirstValue) ? null : Path.GetDirectoryName(origFirstValue),
 				FileName = Path.GetFileName(origFirstValue)
 			};
 
-			if (dlg.ShowDialog(this).Value)
+			if (dlg.ShowDialog(this) == true)
 			{
-				Presets.Text = string.Join(",", dlg.FileNames);
+				Preset.Text = string.Join(",", dlg.FileNames);
 			}
 		}
 
@@ -133,12 +115,6 @@ namespace ReShade.Setup
 			{
 				target.Tag = string.Join(",", dlg.FileNames);
 			}
-		}
-
-		// Force select the first item when there is no selection
-		private void PresetSelect_SelectionChanged(object sender, SelectionChangedEventArgs e)
-		{
-			PresetSelect.SelectedItem = PresetSelect.SelectedItem ?? PresetSelect.Items[0];
 		}
 
 		private static string CheckboxValue(bool? check) => (check.HasValue && check.Value ? "1" : "0");
